@@ -177,6 +177,78 @@ p, label, .stCaption { color: var(--muted) !important; }
 [data-testid="collapsedControl"]{
   color: rgba(255,255,255,0.7) !important;
 }
+
+
+/* ==================== Hide Streamlit / GitHub / Deploy Icons ==================== */
+
+/* Hide top-right toolbar container */
+[data-testid="stToolbar"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Hide Streamlit main menu */
+#MainMenu {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* Hide footer */
+footer {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* Hide header action buttons, including GitHub / deploy / overflow icons */
+header [data-testid="stToolbar"],
+header [data-testid="stDecoration"],
+header [data-testid="stStatusWidget"],
+header button,
+header a {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Hide GitHub-related links/icons if rendered as anchors */
+a[href*="github"],
+a[href*="GitHub"],
+a[aria-label*="GitHub"],
+a[title*="GitHub"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Hide Streamlit deploy/share/menu related buttons */
+button[title*="Deploy"],
+button[aria-label*="Deploy"],
+button[title*="Share"],
+button[aria-label*="Share"],
+button[title*="GitHub"],
+button[aria-label*="GitHub"],
+button[kind="header"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Reduce header height after hiding toolbar */
+[data-testid="stHeader"] {
+  height: 0rem !important;
+  min-height: 0rem !important;
+  background: transparent !important;
+}
+
+/* Avoid blank space at the top */
+.block-container {
+  padding-top: 1rem !important;
+}
 """
 st.markdown(f"<style>{THEME_CSS}</style>", unsafe_allow_html=True)
 
@@ -547,12 +619,6 @@ if not DB_URL:
 engine = create_engine(DB_URL, pool_pre_ping=True, poolclass=NullPool)
 
 
-# ==================== OCR API CONFIG ====================
-# 兼容 OpenAI-style Vision Chat Completions API:
-# Secrets / env:
-#   OCR_API_KEY="your_api_key"
-#   OCR_API_URL="https://xxx/v1/chat/completions"
-#   OCR_MODEL="your_ocr_or_vision_model"
 OCR_API_KEY = None
 OCR_API_URL = None
 OCR_MODEL = None
@@ -1148,21 +1214,6 @@ with nav_tabs[0]:
     st.header("📄 PDF 报价单 OCR 录入")
     st.caption("上传 PDF 报价文件，系统会调用 OCR / 多模态模型 API 转成数据库字段。识别后请人工确认，再写入数据库。")
 
-    with st.expander("OCR API 配置说明", expanded=False):
-        st.markdown(
-            """
-            请在 Streamlit Secrets 或环境变量中配置：
-
-            ```toml
-            OCR_API_KEY="你的 OCR / 多模态模型 API Key"
-            OCR_API_URL="https://xxx/v1/chat/completions"
-            OCR_MODEL="你的模型名"
-            ```
-
-            当前代码按 OpenAI-compatible Vision Chat Completions 接口调用。
-            如果你的 OCR 厂商接口不是这个格式，需要只改 `call_ocr_api_for_pdf()` 函数。
-            """
-        )
 
     uploaded_pdf = st.file_uploader("上传 PDF 报价文件", type=["pdf"], key="upload_pdf_ocr")
 
