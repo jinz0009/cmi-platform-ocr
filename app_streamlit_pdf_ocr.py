@@ -11,6 +11,9 @@ Run:
 Streamlit Cloud:
     Secrets:
         DB_URL="postgresql+psycopg2://USER:PASSWORD@HOST/DB?sslmode=require"
+        DS_OCR2_API_KEY="YOUR_API_KEY"
+        DS_OCR2_API_URL="https://YOUR_PROVIDER/v1/chat/completions"
+        DS_OCR2_MODEL="deepseek-ocr2"
 """
 
 import os
@@ -177,6 +180,80 @@ p, label, .stCaption { color: var(--muted) !important; }
 [data-testid="collapsedControl"]{
   color: rgba(255,255,255,0.7) !important;
 }
+
+
+/* ==================== Hide Streamlit / GitHub / Deploy Icons ==================== */
+
+/* Hide top-right toolbar container */
+[data-testid="stToolbar"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Hide Streamlit main menu */
+#MainMenu {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* Hide footer */
+footer {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* Hide header action buttons, including GitHub / deploy / overflow icons */
+header [data-testid="stToolbar"],
+header [data-testid="stDecoration"],
+header [data-testid="stStatusWidget"],
+header button,
+header a {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Hide GitHub-related links/icons if rendered as anchors */
+a[href*="github"],
+a[href*="GitHub"],
+a[aria-label*="GitHub"],
+a[title*="GitHub"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Hide Streamlit deploy/share/menu related buttons */
+button[title*="Deploy"],
+button[aria-label*="Deploy"],
+button[title*="Share"],
+button[aria-label*="Share"],
+button[title*="GitHub"],
+button[aria-label*="GitHub"],
+button[kind="header"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Reduce header height after hiding toolbar */
+[data-testid="stHeader"] {
+  height: 0rem !important;
+  min-height: 0rem !important;
+  background: transparent !important;
+}
+
+/* Avoid blank space at the top */
+.block-container {
+  padding-top: 1rem !important;
+}
+
+
 """
 st.markdown(f"<style>{THEME_CSS}</style>", unsafe_allow_html=True)
 
@@ -547,26 +624,20 @@ if not DB_URL:
 engine = create_engine(DB_URL, pool_pre_ping=True, poolclass=NullPool)
 
 
-# ==================== OCR API CONFIG ====================
-# 兼容 OpenAI-style Vision Chat Completions API:
-# Secrets / env:
-#   OCR_API_KEY="your_api_key"
-#   OCR_API_URL="https://xxx/v1/chat/completions"
-#   OCR_MODEL="your_ocr_or_vision_model"
-OCR_API_KEY = None
-OCR_API_URL = None
-OCR_MODEL = None
+def get_secret_or_env(name: str, default=None):
+    value = None
+    try:
+        value = st.secrets.get(name, None)
+    except Exception:
+        value = None
+    if value is None:
+        value = os.getenv(name, default)
+    return value
 
-try:
-    OCR_API_KEY = st.secrets.get("OCR_API_KEY", None)
-    OCR_API_URL = st.secrets.get("OCR_API_URL", None)
-    OCR_MODEL = st.secrets.get("OCR_MODEL", None)
-except Exception:
-    pass
 
-OCR_API_KEY = OCR_API_KEY or os.getenv("OCR_API_KEY")
-OCR_API_URL = OCR_API_URL or os.getenv("OCR_API_URL", "https://api.openai.com/v1/chat/completions")
-OCR_MODEL = OCR_MODEL or os.getenv("OCR_MODEL", "gpt-4o-mini")
+DS_OCR2_API_KEY = get_secret_or_env("DS_OCR2_API_KEY")
+DS_OCR2_API_URL = get_secret_or_env("DS_OCR2_API_URL")
+DS_OCR2_MODEL = get_secret_or_env("DS_OCR2_MODEL", "deepseek-ocr2")
 
 
 # ==================== INIT DB ====================
@@ -676,6 +747,118 @@ NUMERIC_COLUMNS = ["设备单价", "人工包干单价", "综合单价汇总"]
 REGION_OPTIONS = ["Singapore", "Malaysia", "Thailand", "Indonesia", "Vietnam", "Philippines", "Others"]
 REGION_OPTIONS_ADMIN = ["Singapore", "Malaysia", "Thailand", "Indonesia", "Vietnam", "Philippines", "Others", "All"]
 CURRENCY_OPTIONS = ["IDR", "USD", "RMB", "SGD", "MYR", "THB"]
+
+OCR_MAPPING_COLUMNS = [
+    "Ignore",
+    "设备材料名称",
+    "规格或型号",
+    "品牌",
+    "设备单价",
+    "人工包干单价",
+    "综合单价汇总",
+    "原厂品牌维保期限",
+    "货期",
+    "备注",
+]
+
+OCR_EDITABLE_COLUMNS = [
+    "设备材料名称",
+    "规格或型号",
+    "品牌",
+    "设备单价",
+    "人工包干单价",
+    "综合单价汇总",
+    "原厂品牌维保期限",
+    "货期",
+    "备注",
+]
+
+DS_OCR2_FIXED_PROMPT = """
+请识别这张报价单页面中的报价明细表，并同时输出“原始表头 JSON”和“AI 自动匹配数据库字段 JSON”。
+
+重要要求：
+1. 只输出 JSON object，不要输出解释文字、Markdown 或代码块；
+2. 保留报价单原始表头，不要擅自改名；
+3. 保留每一行报价明细，不要合并不同行；
+4. 看不清、模糊、无法确认、被遮挡、疑似错误的内容，统一输出字符串：请核查；
+5. 不要猜测价格、型号、币种、小数点；
+6. 不要把 subtotal、total、title、header、页脚、签字栏当成设备明细；
+7. 如果某个原始列无法匹配数据库字段，请在 column_mapping 中标记为 Ignore；
+8. 如果页面没有报价明细表，输出空数组，不要编造数据。
+
+数据库字段只允许以下字段参与 AI 匹配：
+[
+  "设备材料名称",
+  "规格或型号",
+  "品牌",
+  "设备单价",
+  "人工包干单价",
+  "综合单价汇总",
+  "原厂品牌维保期限",
+  "货期",
+  "备注"
+]
+
+以下字段不要从 OCR 表格中匹配，后续由网页人工统一填写：
+[
+  "币种",
+  "项目名称",
+  "供应商名称",
+  "询价日期",
+  "询价人",
+  "地区"
+]
+
+请严格输出以下 JSON 格式：
+{
+  "raw_tables": [
+    {
+      "table_name": "quotation_table",
+      "columns": ["原始列名1", "原始列名2"],
+      "rows": [
+        {
+          "原始列名1": "原始内容",
+          "原始列名2": "原始内容"
+        }
+      ]
+    }
+  ],
+  "column_mapping": {
+    "原始列名1": "设备材料名称",
+    "原始列名2": "规格或型号",
+    "无法匹配的原始列名": "Ignore"
+  },
+  "mapped_tables": [
+    {
+      "table_name": "quotation_table_mapped",
+      "columns": [
+        "设备材料名称",
+        "规格或型号",
+        "品牌",
+        "设备单价",
+        "人工包干单价",
+        "综合单价汇总",
+        "原厂品牌维保期限",
+        "货期",
+        "备注"
+      ],
+      "rows": [
+        {
+          "设备材料名称": "",
+          "规格或型号": "",
+          "品牌": "",
+          "设备单价": null,
+          "人工包干单价": null,
+          "综合单价汇总": null,
+          "原厂品牌维保期限": "",
+          "货期": "",
+          "备注": ""
+        }
+      ]
+    }
+  ]
+}
+""".strip()
 
 
 # ==================== SEARCH SYNONYMS ====================
@@ -859,8 +1042,26 @@ def normalize_cell(x):
     return s
 
 
-def pdf_bytes_to_page_images_base64(pdf_bytes: bytes, dpi: int = 200, max_pages: int = 5):
-    """Convert PDF pages to PNG base64 strings for OCR/VLM APIs."""
+def normalize_unclear_text(value):
+    """将 OCR 模型常见的不确定表达统一显示为“请核查”。"""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s:
+        return ""
+
+    unclear_tokens = {
+        "unclear", "[unclear]", "unknown", "[unknown]", "n/a", "na",
+        "无法识别", "无法确认", "看不清", "模糊", "不清楚", "不可读", "未识别",
+        "请核查", "请核对", "需核查", "需人工核查"
+    }
+    if s.lower() in unclear_tokens or s in unclear_tokens:
+        return "请核查"
+    return s
+
+
+def pdf_bytes_to_page_png_bytes(pdf_bytes: bytes, dpi: int = 220, max_pages: int = 8):
+    """将 PDF 每页转为 PNG bytes，供 DeepSeek-OCR2 图片接口识别。"""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     pages = []
     zoom = dpi / 72
@@ -869,8 +1070,7 @@ def pdf_bytes_to_page_images_base64(pdf_bytes: bytes, dpi: int = 200, max_pages:
     for i in range(min(len(doc), max_pages)):
         page = doc.load_page(i)
         pix = page.get_pixmap(matrix=matrix, alpha=False)
-        png_bytes = pix.tobytes("png")
-        pages.append(base64.b64encode(png_bytes).decode("utf-8"))
+        pages.append(pix.tobytes("png"))
 
     doc.close()
     return pages
@@ -879,7 +1079,7 @@ def pdf_bytes_to_page_images_base64(pdf_bytes: bytes, dpi: int = 200, max_pages:
 def extract_json_from_text(text_value: str):
     """Extract JSON object from model response, including ```json fenced content."""
     if not text_value:
-        raise ValueError("OCR API returned empty content.")
+        raise ValueError("OCR 服务返回空内容。")
 
     s = str(text_value).strip()
     s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
@@ -898,125 +1098,221 @@ def extract_json_from_text(text_value: str):
     raise ValueError("OCR result is not valid JSON.")
 
 
-def call_ocr_api_for_pdf(pdf_bytes: bytes, filename: str):
-    if not OCR_API_KEY:
-        raise ValueError("Missing OCR_API_KEY. Please set it in Streamlit Secrets or environment variables.")
+def normalize_json_values(obj):
+    """递归清理 JSON 中的 OCR 不确定表达。"""
+    if isinstance(obj, dict):
+        return {str(k): normalize_json_values(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [normalize_json_values(v) for v in obj]
+    if obj is None:
+        return None
+    if isinstance(obj, (int, float, bool)):
+        return obj
+    return normalize_unclear_text(obj)
 
-    page_images = pdf_bytes_to_page_images_base64(pdf_bytes, dpi=200, max_pages=8)
-    if not page_images:
-        raise ValueError("No pages found in PDF.")
 
-    schema_hint = {
-        "项目名称": "",
-        "供应商名称": "",
-        "询价人": "",
-        "询价日期": "",
-        "币种": "",
-        "items": [
-            {
-                "设备材料名称": "",
-                "规格或型号": "",
-                "品牌": "",
-                "设备单价": None,
-                "人工包干单价": None,
-                "综合单价汇总": None,
-                "币种": "",
-                "原厂品牌维保期限": "",
-                "货期": "",
-                "备注": ""
-            }
-        ]
-    }
+def call_deepseek_ocr2_image_api(image_bytes: bytes, filename: str = "page.png") -> dict:
+    """
+    调用第三方已部署好的 DeepSeek-OCR2 / 多模态 OCR API。
 
-    prompt = f"""
-你是报价单 OCR 与结构化抽取助手。请从 PDF 页面图片中识别报价信息，并严格输出 JSON，不要输出解释文字。
+    默认按 OpenAI-compatible Chat Completions 图片输入格式发送：
+    - DS_OCR2_API_KEY：第三方平台提供的 API Key
+    - DS_OCR2_API_URL：第三方平台提供的 chat/completions 接口地址
+    - DS_OCR2_MODEL：第三方平台提供的模型名
 
-目标数据库字段如下：
-设备材料名称, 规格或型号, 品牌, 设备单价, 人工包干单价, 综合单价汇总, 币种,
-原厂品牌维保期限, 货期, 备注, 询价人, 项目名称, 供应商名称, 询价日期, 地区
+    固定 Prompt 位于 DS_OCR2_FIXED_PROMPT，并随每一页图片一起发送。
+    """
+    if not DS_OCR2_API_KEY:
+        raise ValueError("OCR 服务暂未配置，请联系管理员。")
 
-要求：
-1. 只输出 JSON object；
-2. 顶层包含：项目名称、供应商名称、询价人、询价日期、币种、items；
-3. items 是报价明细数组；
-4. 每个 item 只能包含以下字段：
-   设备材料名称、规格或型号、品牌、设备单价、人工包干单价、综合单价汇总、币种、原厂品牌维保期限、货期、备注；
-5. 数字字段必须输出数字或 null，不要带货币符号和千分位逗号；
-6. 看不清或没有的信息输出空字符串或 null，不要猜测；
-7. 不要把 subtotal/total/title/header 当成设备明细；
-8. 如果页面包含多张表，合并到同一个 items 数组中；
-9. 输出格式示例：
-{json.dumps(schema_hint, ensure_ascii=False)}
-"""
+    if not DS_OCR2_API_URL:
+        raise ValueError("OCR 服务地址暂未配置，请联系管理员。")
 
-    content = [{"type": "text", "text": prompt}]
-    for img_b64 in page_images:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{img_b64}"}
-        })
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    image_data_url = f"data:image/png;base64,{image_b64}"
 
     payload = {
-        "model": OCR_MODEL,
-        "messages": [{"role": "user", "content": content}],
+        "model": DS_OCR2_MODEL,
         "temperature": 0,
-        "response_format": {"type": "json_object"},
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": DS_OCR2_FIXED_PROMPT,
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_data_url
+                        },
+                    },
+                ],
+            }
+        ],
     }
 
     headers = {
-        "Authorization": f"Bearer {OCR_API_KEY}",
+        "Authorization": f"Bearer {DS_OCR2_API_KEY}",
         "Content-Type": "application/json",
     }
 
-    response = requests.post(OCR_API_URL, headers=headers, json=payload, timeout=300)
+    response = requests.post(
+        DS_OCR2_API_URL,
+        headers=headers,
+        json=payload,
+        timeout=300,
+    )
     response.raise_for_status()
     data = response.json()
 
-    # OpenAI-compatible: choices[0].message.content
-    result_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    return extract_json_from_text(result_text)
+    # 兼容少数 OCR API 直接返回结构化 JSON 的情况。
+    if isinstance(data.get("json"), dict):
+        return normalize_json_values(data["json"])
+    if isinstance(data.get("result"), dict):
+        return normalize_json_values(data["result"])
+
+    # OpenAI-compatible 标准返回：choices[0].message.content
+    try:
+        text_value = data["choices"][0]["message"]["content"]
+    except Exception:
+        text_value = data.get("text") or data.get("ocr_text") or data.get("content") or ""
+
+    parsed = extract_json_from_text(text_value)
+    return normalize_json_values(parsed)
 
 
-def normalize_ocr_json_to_df(ocr_json: dict, user_region: str) -> pd.DataFrame:
-    global_project = normalize_cell(ocr_json.get("项目名称", ""))
-    global_supplier = normalize_cell(ocr_json.get("供应商名称", ""))
-    global_enquirer = normalize_cell(ocr_json.get("询价人", ""))
-    global_date = normalize_cell(ocr_json.get("询价日期", ""))
-    global_currency = normalize_cell(ocr_json.get("币种", ""))
+def merge_ds_ocr2_page_json(page_json_list):
+    """合并多页 DeepSeek-OCR2 输出。"""
+    merged = {
+        "raw_tables": [],
+        "column_mapping": {},
+        "mapped_tables": []
+    }
 
-    items = ocr_json.get("items", [])
-    if not isinstance(items, list):
-        items = []
-
-    rows = []
-    for item in items:
-        if not isinstance(item, dict):
+    for page_idx, obj in enumerate(page_json_list, start=1):
+        if not isinstance(obj, dict):
             continue
 
-        row = {col: "" for col in DB_COLUMNS}
-        for col in DB_COLUMNS:
-            if col in item:
-                row[col] = item.get(col)
+        for table in obj.get("raw_tables", []) or []:
+            if isinstance(table, dict):
+                table = table.copy()
+                table["page"] = page_idx
+                merged["raw_tables"].append(table)
 
-        row["项目名称"] = normalize_cell(row.get("项目名称")) or global_project or ""
-        row["供应商名称"] = normalize_cell(row.get("供应商名称")) or global_supplier or ""
-        row["询价人"] = normalize_cell(row.get("询价人")) or global_enquirer or ""
-        row["询价日期"] = normalize_cell(row.get("询价日期")) or global_date or str(date.today())
-        row["币种"] = normalize_cell(row.get("币种")) or global_currency or ""
-        row["地区"] = user_region
+        for raw_col, target_col in (obj.get("column_mapping", {}) or {}).items():
+            if raw_col not in merged["column_mapping"]:
+                merged["column_mapping"][raw_col] = target_col
 
-        rows.append(row)
+        for table in obj.get("mapped_tables", []) or []:
+            if isinstance(table, dict):
+                table = table.copy()
+                table["page"] = page_idx
+                merged["mapped_tables"].append(table)
 
-    df = pd.DataFrame(rows, columns=DB_COLUMNS)
+    return merged
 
+
+def call_ds_ocr2_for_pdf(pdf_bytes: bytes, filename: str):
+    """PDF -> 每页图片 -> DeepSeek-OCR2 -> 合并 raw_tables / column_mapping / mapped_tables。"""
+    page_images = pdf_bytes_to_page_png_bytes(pdf_bytes, dpi=220, max_pages=8)
+    if not page_images:
+        raise ValueError("No pages found in PDF.")
+
+    page_outputs = []
+    for idx, img_bytes in enumerate(page_images, start=1):
+        page_json = call_deepseek_ocr2_image_api(img_bytes, filename=f"{filename}_page_{idx}.png")
+        page_outputs.append(page_json)
+
+    return merge_ds_ocr2_page_json(page_outputs)
+
+
+def raw_tables_to_dataframe(ocr_json: dict) -> pd.DataFrame:
+    """将 raw_tables 合并为一个可供人工映射的 DataFrame。"""
+    raw_tables = ocr_json.get("raw_tables", []) if isinstance(ocr_json, dict) else []
+    dfs = []
+
+    for t_idx, table in enumerate(raw_tables, start=1):
+        if not isinstance(table, dict):
+            continue
+        columns = table.get("columns") or []
+        rows = table.get("rows") or []
+        if not isinstance(rows, list):
+            continue
+
+        clean_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            clean_row = {}
+            for col in columns:
+                clean_row[str(col)] = normalize_unclear_text(row.get(col, ""))
+            # 兼容模型漏写 columns 但 rows 里有键的情况
+            for k, v in row.items():
+                if str(k) not in clean_row:
+                    clean_row[str(k)] = normalize_unclear_text(v)
+            clean_rows.append(clean_row)
+
+        if clean_rows:
+            df = pd.DataFrame(clean_rows)
+            df.insert(0, "来源页", table.get("page", ""))
+            df.insert(1, "来源表", table.get("table_name", f"table_{t_idx}"))
+            dfs.append(df)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    return pd.concat(dfs, ignore_index=True, sort=False).fillna("")
+
+
+def get_ai_column_mapping(ocr_json: dict) -> dict:
+    mapping = ocr_json.get("column_mapping", {}) if isinstance(ocr_json, dict) else {}
+    if not isinstance(mapping, dict):
+        return {}
+
+    cleaned = {}
+    for raw_col, target_col in mapping.items():
+        raw_col = str(raw_col)
+        target_col = str(target_col).strip() if target_col is not None else "Ignore"
+        if target_col not in OCR_MAPPING_COLUMNS:
+            target_col = "Ignore"
+        cleaned[raw_col] = target_col
+    return cleaned
+
+
+def apply_column_mapping_to_raw_df(raw_df: pd.DataFrame, mapped_choices: dict) -> pd.DataFrame:
+    """根据用户确认后的 mapping，生成可人工编辑的数据库字段表。"""
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=OCR_EDITABLE_COLUMNS)
+
+    result = pd.DataFrame()
+    for raw_col, target_col in mapped_choices.items():
+        if target_col == "Ignore":
+            continue
+        if raw_col not in raw_df.columns:
+            continue
+        if target_col not in OCR_EDITABLE_COLUMNS:
+            continue
+
+        # 如果多个 OCR 列映射到同一个目标字段，优先保留已有非空值，用空值补充。
+        source_ser = raw_df[raw_col].map(normalize_unclear_text)
+        if target_col not in result.columns:
+            result[target_col] = source_ser
+        else:
+            mask = result[target_col].map(normalize_cell).isna()
+            result.loc[mask, target_col] = source_ser.loc[mask]
+
+    for col in OCR_EDITABLE_COLUMNS:
+        if col not in result.columns:
+            result[col] = ""
+
+    result = result[OCR_EDITABLE_COLUMNS]
     for col in NUMERIC_COLUMNS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
-                errors="coerce"
-            )
+        if col in result.columns:
+            result[col] = result[col].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False)
 
-    return df
+    return result
 
 
 def validate_quotation_df(df: pd.DataFrame):
@@ -1146,23 +1442,7 @@ with nav_tabs[0]:
     ui_hr()
 
     st.header("📄 PDF 报价单 OCR 录入")
-    st.caption("上传 PDF 报价文件，系统会调用 OCR / 多模态模型 API 转成数据库字段。识别后请人工确认，再写入数据库。")
-
-    with st.expander("OCR API 配置说明", expanded=False):
-        st.markdown(
-            """
-            请在 Streamlit Secrets 或环境变量中配置：
-
-            ```toml
-            OCR_API_KEY="你的 OCR / 多模态模型 API Key"
-            OCR_API_URL="https://xxx/v1/chat/completions"
-            OCR_MODEL="你的模型名"
-            ```
-
-            当前代码按 OpenAI-compatible Vision Chat Completions 接口调用。
-            如果你的 OCR 厂商接口不是这个格式，需要只改 `call_ocr_api_for_pdf()` 函数。
-            """
-        )
+    st.caption("上传 PDF 报价文件，系统会调用 DeepSeek-OCR2 服务识别为原始表格，并给出 AI 推荐字段映射。最终入库前必须人工确认。")
 
     uploaded_pdf = st.file_uploader("上传 PDF 报价文件", type=["pdf"], key="upload_pdf_ocr")
 
@@ -1171,53 +1451,181 @@ with nav_tabs[0]:
 
         col_ocr_1, col_ocr_2 = st.columns([1, 4])
         run_ocr = col_ocr_1.button("开始 OCR 识别", key="run_pdf_ocr")
-        col_ocr_2.caption("识别结果会先进入可编辑表格，不会直接入库。")
+        col_ocr_2.caption("识别结果会先展示原始表格和 AI 推荐映射，不会直接入库。")
 
         if run_ocr:
             try:
-                with st.spinner("正在识别 PDF 并转换为报价字段，请稍候..."):
-                    ocr_json = call_ocr_api_for_pdf(uploaded_pdf.getvalue(), uploaded_pdf.name)
-                    df_ocr = normalize_ocr_json_to_df(ocr_json, user["region"])
+                with st.spinner("正在调用 DeepSeek-OCR2 识别 PDF，请稍候..."):
+                    ocr_json = call_ds_ocr2_for_pdf(uploaded_pdf.getvalue(), uploaded_pdf.name)
+                    raw_df = raw_tables_to_dataframe(ocr_json)
+                    ai_mapping = get_ai_column_mapping(ocr_json)
 
-                    st.session_state["ocr_json_raw"] = json.dumps(ocr_json, ensure_ascii=False, indent=2)
-                    st.session_state["ocr_df_csv"] = df_ocr.to_csv(index=False)
-
-                st.success("OCR 识别完成，请在下方检查并修改识别结果。")
+                    if raw_df.empty:
+                        st.warning("OCR 未识别到可用报价表格，请检查 PDF 是否清晰。")
+                    else:
+                        st.session_state["ocr_json_raw"] = json.dumps(ocr_json, ensure_ascii=False, indent=2)
+                        st.session_state["ocr_raw_df_csv"] = raw_df.to_csv(index=False)
+                        st.session_state["ocr_ai_mapping_json"] = json.dumps(ai_mapping, ensure_ascii=False)
+                        st.session_state.pop("ocr_mapped_csv", None)
+                        st.session_state.pop("ocr_edited_csv", None)
+                        st.session_state.pop("ocr_final_csv", None)
+                        st.session_state["ocr_ready_for_global"] = False
+                        st.success("OCR 识别完成，请先检查原始表格和 AI 推荐字段映射。")
             except Exception as e:
                 st.error(f"OCR 识别失败：{e}")
 
     if st.session_state.get("ocr_json_raw"):
-        with st.expander("查看 OCR 原始 JSON", expanded=False):
+        with st.expander("查看 DeepSeek-OCR2 原始 JSON", expanded=False):
             st.code(st.session_state["ocr_json_raw"], language="json")
 
-    if st.session_state.get("ocr_df_csv"):
+    if st.session_state.get("ocr_raw_df_csv"):
         try:
-            df_ocr_preview = pd.read_csv(io.StringIO(st.session_state["ocr_df_csv"]), dtype=object)
-            for col in DB_COLUMNS:
-                if col not in df_ocr_preview.columns:
-                    df_ocr_preview[col] = pd.NA
-            df_ocr_preview = df_ocr_preview[DB_COLUMNS]
+            raw_df = pd.read_csv(io.StringIO(st.session_state["ocr_raw_df_csv"]), dtype=object).fillna("")
         except Exception as e:
-            st.error(f"恢复 OCR 表格失败：{e}")
-            df_ocr_preview = pd.DataFrame(columns=DB_COLUMNS)
+            st.error(f"恢复 OCR 原始表格失败：{e}")
+            raw_df = pd.DataFrame()
 
-        st.markdown("### OCR 结果人工确认")
-        st.warning("请重点核对：设备材料名称、规格或型号、设备单价、人工包干单价、综合单价汇总、币种、小数点、货期和维保期限。")
+        try:
+            ai_mapping = json.loads(st.session_state.get("ocr_ai_mapping_json", "{}"))
+        except Exception:
+            ai_mapping = {}
+
+        if not raw_df.empty:
+            st.markdown("### 1. OCR 原始识别表格")
+            st.caption("这里显示 DeepSeek-OCR2 识别出的原始表头和原始内容。看不清的内容会显示为：请核查。")
+            safe_st_dataframe(raw_df, height=360)
+
+            st.markdown("### 2. AI 推荐字段映射，可人工修改")
+            st.caption("AI 会先自动猜测每个 OCR column 对应哪个数据库字段。如果不对，可以手动改。")
+
+            mapped_choices = {}
+            with st.form("ocr_ai_mapping_form", clear_on_submit=False):
+                cols_left, cols_right = st.columns(2)
+                for i, raw_col in enumerate(raw_df.columns):
+                    # 来源页 / 来源表只用于追溯，不参与入库字段映射。
+                    if raw_col in ["来源页", "来源表"]:
+                        default = "Ignore"
+                    else:
+                        default = ai_mapping.get(raw_col, auto_map_header(raw_col) or "Ignore")
+                        if default not in OCR_MAPPING_COLUMNS:
+                            default = "Ignore"
+
+                    container = cols_left if i % 2 == 0 else cols_right
+                    selected = container.selectbox(
+                        f"OCR列：{raw_col}",
+                        OCR_MAPPING_COLUMNS,
+                        index=OCR_MAPPING_COLUMNS.index(default),
+                        key=f"ocr_ds_map_{i}_{raw_col}"
+                    )
+                    mapped_choices[raw_col] = selected
+
+                submit_mapping = st.form_submit_button("应用映射并进入人工修改")
+
+            if submit_mapping:
+                df_mapped = apply_column_mapping_to_raw_df(raw_df, mapped_choices)
+                st.session_state["ocr_mapped_csv"] = df_mapped.to_csv(index=False)
+                st.session_state.pop("ocr_edited_csv", None)
+                st.session_state.pop("ocr_final_csv", None)
+                st.session_state["ocr_ready_for_global"] = False
+                st.success("字段映射已应用。请在下方人工修改识别结果。")
+
+    if st.session_state.get("ocr_mapped_csv"):
+        try:
+            df_for_edit = pd.read_csv(io.StringIO(st.session_state["ocr_mapped_csv"]), dtype=object).fillna("")
+            for col in OCR_EDITABLE_COLUMNS:
+                if col not in df_for_edit.columns:
+                    df_for_edit[col] = ""
+            df_for_edit = df_for_edit[OCR_EDITABLE_COLUMNS]
+        except Exception as e:
+            st.error(f"恢复映射后表格失败：{e}")
+            df_for_edit = pd.DataFrame(columns=OCR_EDITABLE_COLUMNS)
+
+        st.markdown("### 3. 人工修改识别结果")
+        st.warning("请重点核对：设备材料名称、规格或型号、设备单价、人工包干单价、综合单价汇总、小数点、货期和维保期限。")
 
         edited_df = st.data_editor(
-            df_ocr_preview,
+            df_for_edit,
             use_container_width=True,
             num_rows="dynamic",
-            key="ocr_edit_table",
+            key="ocr_edit_table_after_mapping",
             height=420,
         )
 
-        c_valid, c_invalid = validate_quotation_df(edited_df)
+        if st.button("保存人工修改，下一步填写全局信息", key="save_ocr_edits_next_global"):
+            st.session_state["ocr_edited_csv"] = edited_df.to_csv(index=False)
+            st.session_state["ocr_ready_for_global"] = True
+            st.session_state.pop("ocr_final_csv", None)
+            st.success("人工修改已保存。请继续填写全局信息。")
 
+    if st.session_state.get("ocr_ready_for_global") and st.session_state.get("ocr_edited_csv"):
+        try:
+            df_edited_saved = pd.read_csv(io.StringIO(st.session_state["ocr_edited_csv"]), dtype=object).fillna("")
+            for col in OCR_EDITABLE_COLUMNS:
+                if col not in df_edited_saved.columns:
+                    df_edited_saved[col] = ""
+            df_edited_saved = df_edited_saved[OCR_EDITABLE_COLUMNS]
+        except Exception as e:
+            st.error(f"恢复人工修改表格失败：{e}")
+            df_edited_saved = pd.DataFrame(columns=OCR_EDITABLE_COLUMNS)
+
+        st.markdown("### 4. 填写全局信息")
+        st.caption("以下 5 项由人工统一填写，并覆盖到每一条报价记录：币种、项目名称、供应商名称、询价日期、询价人。地区自动使用当前登录用户地区。")
+
+        with st.form("ocr_global_info_form", clear_on_submit=False):
+            g1, g2, g3, g4, g5 = st.columns(5)
+            g_currency = g1.selectbox("币种", CURRENCY_OPTIONS, key="ocr_global_currency")
+            g_project = g2.text_input("项目名称", key="ocr_global_project")
+            g_supplier = g3.text_input("供应商名称", key="ocr_global_supplier")
+            g_date = g4.date_input("询价日期", value=date.today(), key="ocr_global_date")
+            g_enquirer = g5.text_input("询价人", key="ocr_global_enquirer")
+            apply_global = st.form_submit_button("应用全局信息并校验")
+
+        if apply_global:
+            if not (g_currency and g_project and g_supplier and g_date and g_enquirer):
+                st.error("请填写：币种、项目名称、供应商名称、询价日期、询价人。")
+            else:
+                df_final = df_edited_saved.copy()
+                df_final["币种"] = str(g_currency)
+                df_final["项目名称"] = str(g_project)
+                df_final["供应商名称"] = str(g_supplier)
+                df_final["询价日期"] = str(g_date)
+                df_final["询价人"] = str(g_enquirer)
+                df_final["地区"] = user["region"]
+
+                for col in DB_COLUMNS:
+                    if col not in df_final.columns:
+                        df_final[col] = ""
+                df_final = df_final[DB_COLUMNS]
+
+                for col in NUMERIC_COLUMNS:
+                    if col in df_final.columns:
+                        df_final[col] = pd.to_numeric(
+                            df_final[col].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
+                            errors="coerce"
+                        )
+
+                st.session_state["ocr_final_csv"] = df_final.to_csv(index=False)
+                st.success("全局信息已应用，请检查校验结果后确认入库。")
+
+    if st.session_state.get("ocr_final_csv"):
+        try:
+            df_final_preview = pd.read_csv(io.StringIO(st.session_state["ocr_final_csv"]), dtype=object)
+            for col in DB_COLUMNS:
+                if col not in df_final_preview.columns:
+                    df_final_preview[col] = pd.NA
+            df_final_preview = df_final_preview[DB_COLUMNS]
+        except Exception as e:
+            st.error(f"恢复最终表格失败：{e}")
+            df_final_preview = pd.DataFrame(columns=DB_COLUMNS)
+
+        st.markdown("### 5. 入库前最终确认")
+        safe_st_dataframe(df_final_preview, height=360)
+
+        c_valid, c_invalid = validate_quotation_df(df_final_preview)
         cc1, cc2, cc3 = st.columns(3)
         cc1.metric("可导入记录", len(c_valid))
         cc2.metric("需修正记录", len(c_invalid))
-        cc3.metric("总记录", len(edited_df))
+        cc3.metric("总记录", len(df_final_preview))
 
         if not c_invalid.empty:
             st.markdown("#### 以下记录缺少必填字段或价格字段，暂不能导入")
@@ -1242,8 +1650,12 @@ with nav_tabs[0]:
                         df_to_store.to_sql("quotations", conn, if_exists="append", index=False, method="multi")
 
                     st.success(f"✅ 已导入 {len(df_to_store)} 条 OCR 报价记录。")
-                    st.session_state.pop("ocr_df_csv", None)
-                    st.session_state.pop("ocr_json_raw", None)
+                    for k in [
+                        "ocr_json_raw", "ocr_raw_df_csv", "ocr_ai_mapping_json",
+                        "ocr_mapped_csv", "ocr_edited_csv", "ocr_final_csv",
+                    ]:
+                        st.session_state.pop(k, None)
+                    st.session_state["ocr_ready_for_global"] = False
                     safe_rerun()
                 except Exception as e:
                     st.error(f"导入 OCR 记录失败：{e}")
